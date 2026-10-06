@@ -1,0 +1,9 @@
+chunking:
+  chunk_size: 1000
+  chunk_overlap: 200
+
+model_name: "all-MiniLM-L6-v2"
+
+vector_store:
+  collection_name: "user_documents"
+  persistant_dir: "../vector_store"
