@@ -5,11 +5,11 @@ from pathlib import Path
 
 import streamlit as st
 import yaml
-from langchain_community.document_loaders import PyPDFLoader, TextLoader
 
 from src.chunking import Chunking
 from src.embedding import EmbeddingManager
 from src.generation import RAGRetriever
+from src.ingestion import Ingest, SUPPORTED_EXTENSIONS
 from src.vectore_store import VectorStore
 
 
@@ -120,6 +120,9 @@ st.markdown(
             border-radius: 12px;
             padding: 0.8rem;
         }
+        [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] * {
+            color: #e5e7eb !important;
+        }
 
         h1, h2, h3, p, label {
             color: #e5e7eb;
@@ -142,8 +145,48 @@ st.markdown(
             color: #ffffff;
             border: 0;
         }
+
+        .qpilot-credit {
+            position: fixed;
+            top: 4rem;
+            right: 1.5rem;
+            z-index: 1001;
+            display: flex;
+            align-items: center;
+            gap: 0.3rem;
+            padding: 0.65rem 1rem;
+            border: 1px solid #60a5fa;
+            border-radius: 12px;
+            background: linear-gradient(135deg, #2563eb, #1d4ed8);
+            box-shadow: 0 6px 20px rgba(37, 99, 235, 0.35);
+            color: #ffffff !important;
+            font-size: 0.85rem;
+            font-weight: 600;
+            letter-spacing: 0.01em;
+            white-space: nowrap;
+        }
+
+        .qpilot-credit strong {
+            color: #ffffff !important;
+            font-weight: 700;
+        }
+
+        @media (max-width: 640px) {
+            .qpilot-credit {
+                top: 3.5rem;
+                right: 0.75rem;
+                padding: 0.55rem 0.8rem;
+                font-size: 0.78rem;
+            }
+        }
+
     </style>
     """,
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    '<div class="qpilot-credit">A Product by <strong>Hariharan</strong></div>',
     unsafe_allow_html=True,
 )
 
@@ -186,45 +229,19 @@ def start_session() -> None:
 def delete_session_data() -> None:
     session_dir = Path(st.session_state.session_dir)
     vector_store = st.session_state.vector_store
+    client = vector_store.client
 
-    vector_store.client.delete_collection(name=vector_store.collection_name)
+    # The whole session directory is being removed, so close Chroma first
+    # to release its file handles before deleting it.
+    vector_store.collection = None
+    client.close()
+    vector_store.client = None
 
     st.session_state.clear()
-    del vector_store
+    del vector_store, client
     gc.collect()
 
     shutil.rmtree(session_dir)
-
-
-def load_uploaded_documents(uploaded_files, uploads_dir: Path):
-    shutil.rmtree(uploads_dir, ignore_errors=True)
-    uploads_dir.mkdir(parents=True)
-
-    documents = []
-
-    for uploaded_file in uploaded_files:
-        file_name = Path(uploaded_file.name).name
-        file_path = uploads_dir / file_name
-        file_path.write_bytes(uploaded_file.getvalue())
-
-        suffix = file_path.suffix.lower()
-        if suffix == ".pdf":
-            loaded = PyPDFLoader(str(file_path)).load()
-        elif suffix == ".txt":
-            loaded = TextLoader(
-                str(file_path),
-                autodetect_encoding=True,
-            ).load()
-        else:
-            raise ValueError(f"Unsupported file type: {suffix}")
-
-        for document in loaded:
-            document.metadata["source_file"] = file_name
-            document.metadata["file_type"] = suffix.lstrip(".")
-
-        documents.extend(loaded)
-
-    return documents
 
 
 if "session_id" not in st.session_state:
@@ -237,27 +254,29 @@ if "session_id" not in st.session_state:
 
 with st.sidebar:
     st.title("🤖 QPilot")
-    st.caption("Upload documents and click Index uploaded documents, then ask questions about them.")
+    st.caption("Upload documents and click Finish upload to start asking questions.")
+    st.caption("Supported formats: PDF, TXT, Word (.docx), PowerPoint (.pptx), Excel (.xlsx), CSV, and JSON.")
 
     uploaded_files = st.file_uploader(
-        "Add PDF or TXT documents",
-        type=["pdf", "txt"],
+        "Add documents",
+        type=[extension.lstrip(".") for extension in SUPPORTED_EXTENSIONS],
         accept_multiple_files=True,
         help="The files are stored temporarily for this session.",
+        key=f"uploaded_files_{st.session_state.session_id}",
     )
     if uploaded_files:
         st.markdown("**Selected files**")
         for uploaded_file in uploaded_files:
             size_kb = uploaded_file.size / 1024
             st.caption(f"📄 {uploaded_file.name} · {size_kb:.1f} KB")
-    if st.button("Index uploaded documents", use_container_width=True):
+    if st.button("Finish upload", use_container_width=True):
         if not uploaded_files:
-            st.warning("Upload at least one PDF or TXT file first.")
+            st.warning("Upload at least one supported document first.")
         else:
             try:
                 with st.spinner("Reading and indexing your documents..."):
                     uploads_dir = Path(st.session_state.uploads_dir)
-                    documents = load_uploaded_documents(
+                    documents = Ingest().process_uploaded_files(
                         uploaded_files,
                         uploads_dir,
                     )
@@ -294,14 +313,10 @@ with st.sidebar:
                             )
 
                 if st.session_state.indexed_chunks:
-                    st.success(
-                        f"Indexed {st.session_state.indexed_chunks} chunks."
-                    )
+                    st.success("Documents are ready. You can now ask questions.")
 
             except Exception as error:
                 st.error(f"Could not index the uploaded documents: {error}")
-
-    st.metric("Indexed chunks", st.session_state.indexed_chunks)
 
     if st.button("New conversation", use_container_width=True):
         st.session_state.messages = []
@@ -313,10 +328,11 @@ with st.sidebar:
     if st.button("End session & delete data", use_container_width=True):
         try:
             delete_session_data()
-            st.success("Session files and vector data were deleted.")
-            st.stop()
         except Exception as error:
             st.error(f"Could not fully delete session data: {error}")
+            st.stop()
+
+        st.rerun()
 
 
 st.title("🤖 QPilot")
@@ -325,7 +341,7 @@ st.caption("Your private document Q&A assistant")
 if st.session_state.indexed_chunks == 0:
     with st.chat_message("assistant"):
         st.markdown(
-            "Upload PDF or TXT files in the sidebar and index them to get started."
+            "Upload a supported document in the sidebar and click **Finish upload** to get started."
         )
 
 for message in st.session_state.messages:

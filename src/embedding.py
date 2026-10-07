@@ -21,7 +21,12 @@ class EmbeddingManager:
         try:
             if not self.model:
              raise ValueError("Model not loaded")
-            embeddings = self.model.encode(texts, show_progress_bar=True)
+            embeddings = self.model.encode(
+                    texts,
+                    batch_size=64,
+                    show_progress_bar=True,
+                    convert_to_numpy=True,
+                )
             #print(f"Generated embeddings with shape: {embeddings.shape}")
             return embeddings
         except Exception as e:
